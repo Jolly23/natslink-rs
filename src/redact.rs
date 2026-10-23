@@ -42,29 +42,46 @@ fn secrets_of(raw_url: &str) -> Vec<String> {
         };
         let auth = &part[start..at];
         let mut cands = vec![auth.to_string()];
-        if let Some(decoded) = percent_decode(auth) {
-            if decoded != auth {
+        // Split before decoding, just like authentication: a percent-escaped
+        // colon is part of a username or token, not the password separator.
+        if let Some((user, password)) = auth.split_once(':') {
+            cands.push(user.to_string());
+            cands.push(password.to_string());
+        }
+        for candidate in cands.clone() {
+            if let Some(decoded) = percent_decode(&candidate) {
                 cands.push(decoded);
             }
         }
-        for c in cands.clone() {
-            if let Some((u, p)) = c.split_once(':') {
-                cands.push(u.to_string());
-                cands.push(p.to_string());
+        // Errors may quote a credential independently of its URL. Cover the
+        // runtime's escaped forms, including a second layer of Debug wrapping.
+        for candidate in cands.clone() {
+            for escaped in escaped_forms(&candidate) {
+                cands.extend(escaped_forms(&escaped));
+                cands.push(escaped);
             }
         }
-        // "Secrets" shorter than 3 characters are not masked: turning every "s" in the logs into
-        // *** is worse than leaking a two-byte token.
         for c in cands {
-            if c.len() >= 3 && !secrets.contains(&c) {
+            if !c.is_empty() && !secrets.contains(&c) {
                 secrets.push(c);
             }
         }
     }
+    // Mask the whole credential before any shorter username/password fragment.
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     secrets
 }
 
-fn percent_decode(s: &str) -> Option<String> {
+fn escaped_forms(value: &str) -> [String; 3] {
+    let debug = format!("{value:?}");
+    [
+        debug[1..debug.len() - 1].to_owned(),
+        value.escape_default().to_string(),
+        value.escape_unicode().to_string(),
+    ]
+}
+
+pub(crate) fn percent_decode(s: &str) -> Option<String> {
     if !s.contains('%') {
         return None;
     }
@@ -72,7 +89,10 @@ fn percent_decode(s: &str) -> Option<String> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
             let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
             let v = u8::from_str_radix(hex, 16).ok()?;
             out.push(v);
@@ -160,5 +180,50 @@ mod tests {
             "see nats://***@x:1 now"
         );
         assert_eq!(redact_error("nats://h", "plain"), "plain");
+    }
+
+    #[test]
+    fn short_and_encoded_credentials_are_not_exempt_from_redaction() {
+        for (url, text, secrets) in [
+            ("nats://Q@localhost:4222", "token Q rejected", vec!["Q"]),
+            ("nats://XY@localhost:4222", "token XY rejected", vec!["XY"]),
+            (
+                "nats://Q:XY@localhost:4222",
+                "user Q password XY",
+                vec!["Q", "XY"],
+            ),
+            (
+                "nats://%51:%58%59@localhost:4222",
+                "user Q password XY",
+                vec!["Q", "XY"],
+            ),
+        ] {
+            let redacted = redact_error(url, text);
+            for secret in secrets {
+                assert!(!redacted.contains(secret), "credential survived redaction");
+            }
+        }
+    }
+
+    #[test]
+    fn standalone_quoted_credentials_are_redacted() {
+        for (raw, decoded) in [
+            ("token%22value", "token\"value"),
+            ("token%5Cvalue", "token\\value"),
+            ("token%0Avalue", "token\nvalue"),
+            ("token%C3%A9value", "token\u{e9}value"),
+        ] {
+            let url = format!("nats://{raw}@localhost:4222");
+            for secret in [raw, decoded] {
+                for escaped in escaped_forms(secret) {
+                    for form in std::iter::once(escaped.clone()).chain(escaped_forms(&escaped)) {
+                        assert_eq!(
+                            redact_error(&url, &format!("credential {form} rejected")),
+                            "credential *** rejected",
+                        );
+                    }
+                }
+            }
+        }
     }
 }

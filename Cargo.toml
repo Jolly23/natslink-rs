@@ -1,6 +1,6 @@
 [package]
 name = "natslink"
-version = "1.8.3"
+version = "1.8.4"
 edition = "2021"
 rust-version = "1.91"
 description = "One NATS connection bound to one subject, as a self-healing unit (Rust port of github.com/Jolly23/natslink)"
@@ -33,5 +33,6 @@ tracing = "0.1"
 rand = "0.10"
 
 [dev-dependencies]
+serde_json = "1"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

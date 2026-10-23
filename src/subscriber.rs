@@ -864,6 +864,7 @@ impl Inner {
                 }
                 next = sub.next() => match next {
                     Some(msg) => {
+                        self.links[idx].record_receive(&msg);
                         if !saw_message {
                             saw_message = true;
                             let mut st = self.state.lock().await;
@@ -1403,4 +1404,6 @@ mod tests {
         .unwrap();
         sub.stop().await;
     }
+
+    include!("../tests/support/subscriber_contract.rs");
 }

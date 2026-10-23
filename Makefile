@@ -6,7 +6,7 @@ C2 ?= natslink-nats-2
 P1 ?= 4222
 P2 ?= 4223
 
-.PHONY: fmt clippy test itest itest-up itest-down acl-test bench audit
+.PHONY: fmt clippy reference conformance test itest itest-up itest-down acl-test bench audit
 
 fmt:
 	$(CARGO) fmt --all -- --check
@@ -15,8 +15,14 @@ clippy:
 	$(CARGO) clippy --locked --all-targets -- -D warnings
 
 ## Unit tests only (no server needed; integration tests return early without NATS_TEST_URL).
-test: fmt clippy
+test: fmt clippy reference
 	$(CARGO) test --locked
+
+reference:
+	python3 .github/scripts/check_reference.py
+
+conformance: reference
+	python3 .github/scripts/check_contract.py "$(GO_CONFORMANCE_DIR)"
 
 ## Full suite against two throw-away docker NATS servers.
 itest: itest-up
@@ -24,7 +30,8 @@ itest: itest-up
 	NATS_TEST_URL='nats://$(TOKEN)@127.0.0.1:$(P1)' \
 	NATS_TEST_URL2='nats://$(TOKEN)@127.0.0.1:$(P2)' \
 	NATS_TEST_CONTAINER='$(C1)' \
-	$(CARGO) test --locked -- --test-threads=4 2>&1 | tee itest.log; rc=$${PIPESTATUS[0]}; \
+		$(CARGO) test --locked -- --test-threads=4 > itest.log 2>&1; rc=$$?; \
+		cat itest.log; \
 	exit $$rc
 
 itest-up:

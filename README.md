@@ -11,9 +11,9 @@ one design: a unit owns a single connection bound to a single subject and
 takes care of dialing, exponential-backoff reconnects, rebuilding the
 connection after a permanent close, re-subscribing, bounded back-pressure and
 periodic status reporting. You write the handler; the library keeps the pipe
-alive. The Go README's mental model, failure model, mirroring semantics and
-statistics apply here unchanged; this README covers the Rust API and the
-places where `async-nats` makes the port differ.
+alive. The Go README's mental model and failure model also apply here. This
+README covers the Rust API, the shared mirroring behavior and the differences
+in buffering, lifecycle and statistics imposed by `async-nats`.
 
 - **`Subscriber`** - one connection subscribing to one subject. Three dispatch
   modes (bounded worker pool, synchronous, task-per-message), an optional
@@ -66,8 +66,9 @@ the `[natslink] starting` log line.
    | Runtime | **Permanent close** (`Event::Closed`, `MaxReconnects`, a subscription stream ending) | automatic rebuild | nothing; it never gives up |
 
    Startup errors must crash you. Runtime failures must never bother you.
-   *A successful start is a promise: everything is ready, and the unit will
-   never stop trying.*
+   A successful start means supervision is running; the server may still be
+   unreachable and retried in the background. Use `wait_connected` when startup
+   must wait for a connection. Connection readiness is not a delivery acknowledgement.
 3. **Instances are single-use.** After `stop()` create a new one.
 4. **Supervision parameters are not configurable.** Dial timeout 5 s,
    reconnect backoff 500 ms doubling to 5 s with +50 % jitter, rebuild backoff
@@ -223,6 +224,10 @@ Mirroring is only a constructor: the returned types are the plain
   could. A stalled endpoint backs up and drops only its own copies
   (`queue_dropped` on that endpoint); the pool-level `dropped()` is settled
   asynchronously and only counts messages that every endpoint failed to send.
+  Each send task waits for capacity in its own client's command queue within
+  a fixed 5 s send timeout. A temporary full command queue therefore keeps
+  the message pending instead of discarding it immediately. That wait never
+  blocks the public `publish` call or another endpoint's send task.
 - **Stop** stops accepting first, drains all send tasks in parallel within one
   5 s grace, then closes the member connections in parallel within another
   5 s. Concurrent `stop` calls wait for the same sequence. Accepted into a
@@ -236,11 +241,25 @@ Mirroring is only a constructor: the returned types are the plain
 
 ## Statistics
 
-`stats()` has the same field names as the Go module: `name / running /
+`stats()` uses the Go module's field names: `name / running /
 connected / status / server / reconnects / rebuilds / in_msgs / out_msgs /
 in_bytes / out_bytes / dropped / queue_dropped / deduped / paused / pauses /
 diverged / gated / slow_consumers / queue_len / queue_cap`; counters accumulate
-across rebuilds. A mirrored subscriber reports `connected` only when every
+across rebuilds. Traffic counters are measured by natslink, with these boundaries:
+
+- `out_msgs` / `out_bytes` count successful admission to the client's command
+  queue, with payload bytes only. They do not confirm server receipt.
+- `in_msgs` / `in_bytes` count messages obtained by the subscription reader,
+  before Gate and Dedup. Bytes include payload and encoded headers, excluding
+  subject and reply names. Messages discarded inside the client's full
+  subscription buffer never reach this reader and are not included;
+  `slow_consumers` reports client overflow events, not a lost-message count.
+- Direct publishes and subscriptions created through `client()` bypass
+  wrapper accounting. Messages delivered to a natslink subscription still
+  count at its reader. The underlying client's own statistics remain
+  available from that handle.
+
+A mirrored subscriber reports `connected` only when every
 endpoint is connected, sums the counters and counts `dropped / gated /
 deduped` per copy; `endpoint_stats()` splits them per endpoint. For a mirrored
 pool, `queue_dropped` is reported per endpoint queue: aggregate it once per
@@ -263,13 +282,15 @@ can carry a URL goes through `redact::redact_error`.
 | --- | --- | --- |
 | Runtime | goroutines, synchronous API | tokio; lifecycle is `async fn`, `publish` is synchronous and non-blocking; the handler is `Fn(Message) -> BoxFuture` (wrap a closure with `natslink::handler`) |
 | Receive buffer | `PendingMsgLimit` / `PendingBytesLimit` | `pending_msg_limit` only; no byte limit in `async-nats` |
-| Credentials in the URL | parsed by `nats.go` | `async-nats` does not parse userinfo; the crate splits token / `user:pass` out of the URL and hands them to `ConnectOptions`. Errors from the client therefore never contain credentials; `tests/redaction.rs` pins that. The redactor leaves secrets shorter than 3 characters alone (Go has no lower bound) |
+| Credentials in the URL | parsed by `nats.go` | `async-nats` does not parse userinfo; the crate splits token / `user:pass` out of the URL and hands them to `ConnectOptions`. Errors are redacted, including short and escaped credentials; `tests/redaction.rs` pins that. |
 | Comma-separated URL | per-server credentials | one global credential set; entries with differing userinfo are rejected as `Error::Config` |
 | Reconnect give-up | needs `MaxReconnects(-1)` + `IgnoreAuthErrorAbort` | infinite reconnects by default, auth errors do not abort |
 | Permanent close | `ClosedHandler` → rebuild | `Event::Closed` / `ClientError::MaxReconnects` (filtered by connection generation) or an ended subscription stream → rebuild |
 | Heartbeat | 3 s × 2 misses | `ping_interval` 3 s; the miss count is an `async-nats` internal constant (2) |
 | Backoff callback | after a disconnect only | called before every attempt including the first dial; the crate returns 0 for the first so a healthy start does not wait 500 ms |
 | Publish back-pressure | 16 MB reconnect buffer (bytes), error on overflow | outbound command queue counted in messages (`queue_capacity`); `publish` never awaits |
+| Mirror send task | waits on a member's synchronous publish | awaits the member's command capacity within a fixed 5 s send timeout; public queue admission stays non-blocking |
+| Traffic counters | client message/payload counters, including input rejected by a full pending buffer | natslink admission/read counters; `async-nats` exposes protocol-byte counters rather than equivalent payload counters, so input discarded before the reader and direct `client()` I/O are excluded |
 | `Flush` | PING / PONG round trip | `client.flush()` only writes the buffer to the socket; to know the server processed a SUB, `request` an unanswered subject (the test harness does) |
 | Rejected SUB recovery | probe (temporary SUB + flush + `LastError` delta) | no `LastError` / round-trip flush API in `async-nats`: a conservative rebuild of the affected endpoint on the 2-30 s backoff; a stale error can cost one extra reconnect |
 | Stop | waits for in-flight pool callbacks | same; `Sync` / `PerMessage` callbacks are not awaited. `async-nats` 0.50 exposes no abort for its offline initial-connect loop, so `stop` cannot promise to end that internal retry task immediately |
@@ -285,6 +306,8 @@ dispatch, once per endpoint copy when mirrored.
 make test     # cargo fmt --check, clippy -D warnings, cargo test (integration tests return early without NATS_TEST_URL)
 make itest    # two throw-away docker NATS servers, the full suite, containers removed afterwards
 make acl-test # opt-in ACL hot-reload drill (spawns its own container)
+make reference # Python 3.9+: check Go reference and release metadata
+make conformance GO_CONFORMANCE_DIR=/path/to/natslink # shared offline contract
 ```
 
 The integration suite covers probe environment errors and redaction, all
@@ -297,9 +320,13 @@ delivery resumes. See `CONTRIBUTING.md` for the environment variables.
 
 ## Versioning
 
-Semantic versioning, in lockstep with the Go module: `vX.Y.Z` here implements
-the behaviour of Go natslink `vX.Y.Z`. Tags are the release artefacts; the
-release workflow refuses a tag whose version differs from `Cargo.toml`.
+Major and minor versions track the Go module's behavior: Rust `vX.Y.*`
+implements the Go `vX.Y.*` contract. Patch versions may advance independently
+for implementation-specific fixes. `GO_REFERENCE_VERSION` and
+`package.metadata.go-reference` record the exact published Go release used as
+the reference; the CI conformance commit is pinned separately. Tags are the
+release artefacts. The release workflow checks the reference metadata and
+refuses a tag whose version differs from `Cargo.toml`.
 
 ## License
 

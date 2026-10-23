@@ -50,7 +50,7 @@ pub(crate) struct Link {
     pub(crate) o: Options,
     pub(crate) role: &'static str,
 
-    client: RwLock<Option<Client>>,
+    client: RwLock<Option<Arc<Client>>>,
     /// Incremented on every dial; event callbacks carry their own generation, so late
     /// events from a replaced connection never trigger a rebuild.
     generation: AtomicU64,
@@ -83,10 +83,10 @@ pub(crate) struct Link {
     slow_consumers: AtomicU64,
 
     prev_reconnects: AtomicU64,
-    prev_in_msgs: AtomicU64,
-    prev_out_msgs: AtomicU64,
-    prev_in_bytes: AtomicU64,
-    prev_out_bytes: AtomicU64,
+    in_msgs: AtomicU64,
+    out_msgs: AtomicU64,
+    in_bytes: AtomicU64,
+    out_bytes: AtomicU64,
 
     setup: Mutex<Option<SetupFn>>,
     sub_rejected: Mutex<Option<SubRejectedFn>>,
@@ -130,10 +130,10 @@ impl Link {
             dropped: AtomicU64::new(0),
             slow_consumers: AtomicU64::new(0),
             prev_reconnects: AtomicU64::new(0),
-            prev_in_msgs: AtomicU64::new(0),
-            prev_out_msgs: AtomicU64::new(0),
-            prev_in_bytes: AtomicU64::new(0),
-            prev_out_bytes: AtomicU64::new(0),
+            in_msgs: AtomicU64::new(0),
+            out_msgs: AtomicU64::new(0),
+            in_bytes: AtomicU64::new(0),
+            out_bytes: AtomicU64::new(0),
             setup: Mutex::new(None),
             sub_rejected: Mutex::new(None),
             stats_hook: Mutex::new(None),
@@ -157,6 +157,12 @@ impl Link {
     }
 
     pub(crate) fn client(&self) -> Option<Client> {
+        self.client_snapshot().map(|client| (*client).clone())
+    }
+
+    /// Clone only the Arc on the data path: Client::clone also allocates its
+    /// PollSender future. A snapshot remains valid during a connection rebuild.
+    pub(crate) fn client_snapshot(&self) -> Option<Arc<Client>> {
         let slot = self.client.read().unwrap();
         if self.is_stopped() {
             None
@@ -174,13 +180,28 @@ impl Link {
     }
 
     pub(crate) fn is_connected(&self) -> bool {
-        self.client()
+        self.client_snapshot()
             .map(|c| c.connection_state() == State::Connected)
             .unwrap_or(false)
     }
 
     pub(crate) fn topic(&self) -> &str {
         &self.o.topic
+    }
+
+    pub(crate) fn record_publish(&self, bytes: usize) {
+        self.out_msgs.fetch_add(1, Ordering::Relaxed);
+        self.out_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_receive(&self, message: &async_nats::Message) {
+        // async-nats 0.50 records subject + reply + the complete payload/header
+        // block in Message::length. Remove addressing, retaining encoded headers.
+        let bytes = message.length.saturating_sub(
+            message.subject.len() + message.reply.as_ref().map_or(0, |reply| reply.len()),
+        );
+        self.in_msgs.fetch_add(1, Ordering::Relaxed);
+        self.in_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     /// Reconnect backoff: doubles from `RECONNECT_WAIT` up to `RECONNECT_WAIT_MAX`, plus up to
@@ -435,7 +456,7 @@ impl Link {
         if self.is_stopped() || !self.is_running() {
             return Err(Error::Stopped);
         }
-        if let Some(old) = slot.replace(client) {
+        if let Some(old) = slot.replace(Arc::new(client)) {
             self.absorb(&old);
         }
         Ok(())
@@ -551,21 +572,14 @@ impl Link {
         }
     }
 
-    /// Accumulate a replaced connection's statistics so that `stats()` stays monotonic
-    /// across rebuilds.
+    /// Only reconnects come from the client. Traffic is counted at the wrapper's
+    /// acceptance/delivery boundaries, so a flush during Stop cannot lose its tail
+    /// from the final snapshot and rebuilds never reset traffic counters.
     fn absorb(&self, old: &Client) {
         let st = old.statistics();
         let connects = st.connects.load(Ordering::Relaxed);
         self.prev_reconnects
             .fetch_add(connects.saturating_sub(1), Ordering::Relaxed);
-        self.prev_in_msgs
-            .fetch_add(st.in_messages.load(Ordering::Relaxed), Ordering::Relaxed);
-        self.prev_out_msgs
-            .fetch_add(st.out_messages.load(Ordering::Relaxed), Ordering::Relaxed);
-        self.prev_in_bytes
-            .fetch_add(st.in_bytes.load(Ordering::Relaxed), Ordering::Relaxed);
-        self.prev_out_bytes
-            .fetch_add(st.out_bytes.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
     /// Per-connection counters only. Mirrored subscribers add their shared
@@ -581,10 +595,10 @@ impl Link {
             dropped: self.dropped.load(Ordering::Relaxed),
             slow_consumers: self.slow_consumers.load(Ordering::Relaxed),
             reconnects: self.prev_reconnects.load(Ordering::Relaxed),
-            in_msgs: self.prev_in_msgs.load(Ordering::Relaxed),
-            out_msgs: self.prev_out_msgs.load(Ordering::Relaxed),
-            in_bytes: self.prev_in_bytes.load(Ordering::Relaxed),
-            out_bytes: self.prev_out_bytes.load(Ordering::Relaxed),
+            in_msgs: self.in_msgs.load(Ordering::Relaxed),
+            out_msgs: self.out_msgs.load(Ordering::Relaxed),
+            in_bytes: self.in_bytes.load(Ordering::Relaxed),
+            out_bytes: self.out_bytes.load(Ordering::Relaxed),
             ..Stats::default()
         };
         if let Some(c) = slot.as_ref().filter(|_| !self.is_stopped()) {
@@ -603,10 +617,6 @@ impl Link {
             }
             let st = c.statistics();
             s.reconnects += st.connects.load(Ordering::Relaxed).saturating_sub(1);
-            s.in_msgs += st.in_messages.load(Ordering::Relaxed);
-            s.out_msgs += st.out_messages.load(Ordering::Relaxed);
-            s.in_bytes += st.in_bytes.load(Ordering::Relaxed);
-            s.out_bytes += st.out_bytes.load(Ordering::Relaxed);
         }
         s
     }

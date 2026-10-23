@@ -10,6 +10,7 @@
 //! identical credentials per segment → normal start; differing credentials → start returns
 //! a configuration error (async-nats has one global credential set and cannot match
 //! nats.go's per-server userinfo), and that error must not carry credentials either.
+//! Malformed percent escapes and invalid UTF-8 in userinfo are configuration errors too.
 //! No NATS server is needed (ports 1 / 2 are refused outright).
 
 use natslink::{probe, Options, Publisher, PublisherOptions, ReportInterval};
@@ -30,7 +31,7 @@ const CASES: &[(&str, &[&str])] = &[
         "nats://Q1uc\"Q2uc@127.0.0.1:1,nats://Q1uc\"Q2uc@127.0.0.1:2",
         &["Q1uc", "Q2uc"],
     ),
-    // The only case start must reject: credentials differ between segments.
+    // Start also rejects malformed percent escapes and differing credentials.
     (
         "nats://127.0.0.1:1,nats://Q1cl\"Q2cl@127.0.0.1:2",
         &["Q1cl", "Q2cl"],
@@ -84,8 +85,8 @@ async fn quoted_userinfo_never_leaks() {
         //   start succeeds and the connection retries in the background. Credentials could
         //   surface in the wait_connected timeout error (status and last_err) and in the
         //   stats snapshot.
-        // - Configuration error: a comma list with differing credentials is rejected at
-        //   start, and that error text must not carry credentials either.
+        // - Configuration error: malformed encoding or a comma list with differing
+        //   credentials is rejected at start without exposing credentials.
         match p.start().await {
             Ok(()) => {
                 started += 1;
@@ -100,8 +101,9 @@ async fn quoted_userinfo_never_leaks() {
                 rejected += 1;
                 let text = format!("{e} | {e:?}");
                 assert!(
-                    text.contains("different credentials"),
-                    "{raw:?}: only the mixed-credential comma list may fail start: {e}"
+                    text.contains("different credentials")
+                        || text.contains("invalid percent-encoding"),
+                    "{raw:?}: unexpected configuration error: {e}"
                 );
                 assert_clean(raw, pieces, &text);
             }
@@ -110,7 +112,7 @@ async fn quoted_userinfo_never_leaks() {
     }
     assert_eq!(
         (started, rejected),
-        (CASES.len() - 1, 1),
+        (CASES.len() - 2, 2),
         "both start paths must be exercised"
     );
 }
