@@ -17,7 +17,8 @@
   Keep `GO_REFERENCE_VERSION` and `Cargo.toml` `package.metadata.go-reference`
   pointing at the Go release the crate matches.
 - No business logic and no dependencies beyond `async-nats`, `tokio`,
-  `tracing`, `bytes`, `futures`, `thiserror`, `rand` and `rapidhash`.
+  `tokio-util`, `tracing`, `bytes`, `futures`, `thiserror`, `rand` and `rapidhash`
+  in the runtime library. Test-only dependencies do not change this boundary.
 
 ## Running the tests
 
@@ -27,6 +28,27 @@ Unit tests need no server; the integration tests return early when
 ```bash
 make test            # cargo fmt --check, clippy -D warnings, cargo test
 ```
+
+The maintenance scripts require Python 3.9 or newer. `make reference` checks
+that `GO_REFERENCE_VERSION` agrees with `package.metadata.go-reference` and
+that the crate and Go reference share a major and minor version. Patch
+versions may differ.
+
+`testdata/contract-v1.json` is shared with the Go implementation. It covers
+FIFO deduplication, raw empty payloads, expiry, subscriber gate/dedup ordering,
+custom keys and URL redaction through each library's actual code paths. Run:
+
+```bash
+make conformance GO_CONFORMANCE_DIR=/path/to/natslink
+```
+
+The runner requires byte-identical fixture files, then runs the Go and Rust
+contract tests. CI obtains the Go checkout at the full commit ID recorded in
+`.github/conformance-go.sha`. Updating that pin requires a public commit with
+the matching fixture; it is separate from the published Go version recorded
+in `Cargo.toml`. Existing broker integration tests remain necessary for
+connection recovery, overload and shutdown; the offline contract suite does
+not cover those behaviors.
 
 The integration suite needs two local NATS servers and the `docker` CLI. The
 restart / pause drills `docker stop` / `start` / `restart` the container named
@@ -65,7 +87,10 @@ restart drill when run in parallel.
 ## Releasing
 
 1. Bump `version` in `Cargo.toml`, add a `## [X.Y.Z] - YYYY-MM-DD` section to
-   `CHANGELOG.md`, open a PR.
+   `CHANGELOG.md`, run `make reference`, open a PR. Keep major and minor in
+   step with Go; implementation-specific fixes can advance only this patch.
+   When changing the Go reference, update `GO_REFERENCE_VERSION` and the
+   entire `package.metadata.go-reference` record together.
 2. After the merge, tag `vX.Y.Z` on `main`. The release workflow refuses a tag
    whose version does not match `Cargo.toml`, and uses the CHANGELOG section as
    the release body.

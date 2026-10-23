@@ -1,6 +1,6 @@
 [package]
 name = "natslink"
-version = "1.8.3"
+version = "1.8.4"
 edition = "2021"
 rust-version = "1.91"
 description = "One NATS connection bound to one subject, as a self-healing unit (Rust port of github.com/Jolly23/natslink)"
@@ -15,9 +15,9 @@ publish = false
 # empty [workspace] makes this crate its own root.
 [package.metadata.go-reference]
 module = "github.com/Jolly23/natslink"
-version = "v1.8.3"
-revision = "b3524cc5727824c83dff1a4d4f35478e6c07777a"
-checksum = "h1:4rzL6WszSb347YHxsCanBGAfWgoJTukCYo+wL9lNfPU="
+version = "v1.8.4"
+revision = "d89b206c94c26580371cf72f05a8add300c78b87"
+checksum = "h1:5Q8Pj9zZxmm2ckeW3C3vRK4dmfaQ30zmJUbZkz1KKFk="
 
 [workspace]
 
@@ -33,5 +33,6 @@ tracing = "0.1"
 rand = "0.10"
 
 [dev-dependencies]
+serde_json = "1"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

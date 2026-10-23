@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "dedup_cases": [
+    {
+      "name": "fifo_hits_do_not_refresh", "entries": 2, "window_ms": 0,
+      "steps": [
+        {"payload_hex": "61", "expected_seen": false},
+        {"payload_hex": "62", "expected_seen": false},
+        {"payload_hex": "61", "expected_seen": true},
+        {"payload_hex": "63", "expected_seen": false},
+        {"payload_hex": "61", "expected_seen": false},
+        {"payload_hex": "62", "expected_seen": false}
+      ]
+    },
+    {
+      "name": "age_expiry_reinsert_preserves_live_mapping", "entries": 2, "window_ms": 1000,
+      "steps": [
+        {"payload_hex": "61", "expected_seen": false},
+        {"payload_hex": "61", "advance_ms": 1500, "expected_seen": false},
+        {"payload_hex": "62", "expected_seen": false},
+        {"payload_hex": "61", "expected_seen": true},
+        {"payload_hex": "63", "expected_seen": false},
+        {"payload_hex": "61", "expected_seen": false}
+      ]
+    },
+    {
+      "name": "raw_set_records_empty_payload", "entries": 2, "window_ms": 0,
+      "steps": [
+        {"payload_hex": "", "expected_seen": false},
+        {"payload_hex": "", "expected_seen": true},
+        {"payload_hex": "00", "expected_seen": false},
+        {"payload_hex": "", "expected_seen": true}
+      ]
+    },
+    {
+      "name": "custom_keys_include_zero", "entries": 2, "window_ms": 0,
+      "steps": [
+        {"key": 0, "expected_seen": false},
+        {"key": 0, "expected_seen": true},
+        {"key": 7, "expected_seen": false},
+        {"key": 8, "expected_seen": false},
+        {"key": 0, "expected_seen": false}
+      ]
+    }
+  ],
+  "subscriber_cases": [
+    {
+      "name": "gate_does_not_record_rejected_payload", "entries": 8, "custom_key": false,
+      "steps": [
+        {"payload_hex": "61", "subject": "contract.events", "gate": false, "expected": "gated"},
+        {"payload_hex": "61", "subject": "contract.events", "gate": true, "expected": "delivered"},
+        {"payload_hex": "61", "subject": "contract.events", "gate": true, "expected": "deduped"}
+      ]
+    },
+    {
+      "name": "default_empty_payload_bypasses_dedup", "entries": 8, "custom_key": false,
+      "steps": [
+        {"payload_hex": "", "subject": "contract.events", "gate": true, "expected": "delivered"},
+        {"payload_hex": "", "subject": "contract.events", "gate": true, "expected": "delivered"},
+        {"payload_hex": "00", "subject": "contract.events", "gate": true, "expected": "delivered"},
+        {"payload_hex": "00", "subject": "contract.events", "gate": true, "expected": "deduped"}
+      ]
+    },
+    {
+      "name": "shared_set_collapses_across_subjects", "entries": 8, "custom_key": false,
+      "steps": [
+        {"payload_hex": "61", "subject": "contract.first", "gate": true, "expected": "delivered"},
+        {"payload_hex": "61", "subject": "contract.second", "gate": true, "expected": "deduped"},
+        {"payload_hex": "62", "subject": "contract.second", "gate": true, "expected": "delivered"},
+        {"payload_hex": "62", "subject": "contract.first", "gate": true, "expected": "deduped"}
+      ]
+    },
+    {
+      "name": "custom_key_zero_bypass_and_empty", "entries": 8, "custom_key": true,
+      "steps": [
+        {"payload_hex": "61", "subject": "contract.events", "gate": true, "key": 0, "key_ok": true, "expected": "delivered"},
+        {"payload_hex": "62", "subject": "contract.events", "gate": true, "key": 0, "key_ok": true, "expected": "deduped"},
+        {"payload_hex": "61", "subject": "contract.events", "gate": true, "key": 0, "key_ok": false, "expected": "delivered"},
+        {"payload_hex": "61", "subject": "contract.events", "gate": true, "key": 0, "key_ok": false, "expected": "delivered"},
+        {"payload_hex": "", "subject": "contract.events", "gate": true, "key": 9, "key_ok": true, "expected": "delivered"},
+        {"payload_hex": "", "subject": "contract.events", "gate": true, "key": 9, "key_ok": true, "expected": "deduped"}
+      ]
+    }
+  ],
+  "url_cases": [
+    {
+      "name": "encoded_colon_in_username", "url": "nats://user%3Aname:p%40ss%2Bword@127.0.0.1:4222",
+      "redacted": "nats://***@127.0.0.1:4222", "username": "user:name", "password": "p@ss+word",
+      "forbidden": ["user%3Aname", "user:name", "p%40ss%2Bword", "p@ss+word"]
+    },
+    {
+      "name": "encoded_plus_token", "url": "nats://token%2Bvalue@127.0.0.1:4222",
+      "redacted": "nats://***@127.0.0.1:4222", "username": "token+value",
+      "forbidden": ["token%2Bvalue", "token+value"]
+    },
+    {
+      "name": "literal_plus_is_not_space", "url": "nats://token+value@127.0.0.1:4222",
+      "redacted": "nats://***@127.0.0.1:4222", "username": "token+value",
+      "forbidden": ["token+value"]
+    },
+    {
+      "name": "percent_decoded_once", "url": "nats://token%252Bvalue@127.0.0.1:4222",
+      "redacted": "nats://***@127.0.0.1:4222", "username": "token%2Bvalue",
+      "forbidden": ["token%252Bvalue", "token%2Bvalue"]
+    },
+    {
+      "name": "encoded_username_and_password", "url": "nats://user%40name:pass%3Aword%2525@127.0.0.1:4222",
+      "redacted": "nats://***@127.0.0.1:4222", "username": "user@name", "password": "pass:word%25",
+      "forbidden": ["user%40name", "user@name", "pass%3Aword%2525", "pass:word%25"]
+    }
+  ]
+}

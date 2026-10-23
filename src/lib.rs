@@ -1,7 +1,7 @@
 //! # natslink (Rust)
 //!
 //! Wraps "**one NATS connection bound to one topic**" into a self-supervising unit that works
-//! out of the box. Tracks the public Go module `github.com/Jolly23/natslink` v1.8.3; client-level
+//! out of the box. Tracks the public Go module `github.com/Jolly23/natslink` v1.8.4; client-level
 //! differences are listed in the README.
 //!
 //! - [`probe`] / [`must_probe`]: fail-fast startup probe. Environment errors (address / network /
@@ -25,8 +25,8 @@
 //!
 //! ## Differences from the Go version (read this first)
 //!
-//! - Built on `async-nats` (tokio); every API is an `async fn`; callbacks are
-//!   `Fn(Message) -> BoxFuture`.
+//! - Built on `async-nats` (tokio); lifecycle methods are asynchronous, publishing is
+//!   synchronous and non-blocking, and callbacks are `Fn(Message) -> BoxFuture`.
 //! - `async-nats` **does not parse userinfo in URLs**; this crate splits `nats://token@host` /
 //!   `nats://user:pass@host` into `ConnectOptions::token` / `user_and_password` itself, so the URL
 //!   contract matches the Go version.
@@ -77,8 +77,8 @@ pub use bytes::Bytes;
 /// Rust crate version from Cargo; the Go source lives in its own public module. Logged at startup
 /// to identify the Rust build.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Exact Go module whose semantics this port implements.
-pub const GO_REFERENCE_VERSION: &str = "v1.8.3";
+/// Published Go release used as the reference for the shared minor-version contract.
+pub const GO_REFERENCE_VERSION: &str = "v1.8.4";
 
 // —— Connection supervision parameters: fixed values tuned in production; callers need not (and cannot) configure them ——
 pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -294,8 +294,8 @@ pub(crate) fn split_auth(raw: &str) -> Result<(Vec<String>, Auth), Error> {
                 }
                 servers.push(format!("{scheme}{hostport}"));
                 match userinfo.split_once(':') {
-                    Some((u, p)) => Auth::UserPass(u.to_string(), p.to_string()),
-                    None => Auth::Token(userinfo.to_string()),
+                    Some((u, p)) => Auth::UserPass(decode_userinfo(u)?, decode_userinfo(p)?),
+                    None => Auth::Token(decode_userinfo(userinfo)?),
                 }
             }
             None => {
@@ -322,6 +322,18 @@ pub(crate) fn split_auth(raw: &str) -> Result<(Vec<String>, Auth), Error> {
     Ok((servers, first.unwrap_or(Auth::None)))
 }
 
+// Split the literal ':' before decoding: an escaped colon belongs to the
+// username or token. A '+' in URL userinfo is literal, unlike a form field.
+fn decode_userinfo(value: &str) -> Result<String, Error> {
+    if !value.contains('%') {
+        return Ok(value.to_owned());
+    }
+    redact::percent_decode(value).ok_or_else(|| {
+        // Never echo a malformed credential, including in Debug output.
+        Error::Config("invalid percent-encoding or UTF-8 in URL userinfo".into())
+    })
+}
+
 pub(crate) fn apply_auth(co: ConnectOptions, auth: &Auth) -> ConnectOptions {
     match auth {
         Auth::None => co,
@@ -330,9 +342,11 @@ pub(crate) fn apply_auth(co: ConnectOptions, auth: &Auth) -> ConnectOptions {
     }
 }
 
-/// Point-in-time snapshot of status and traffic statistics. Counters accumulate across self-healing
-/// rebuilds; they may dip briefly at the moment of a rebuild switch, so delta-based monitoring
-/// should clamp negative increments to zero. Field meanings match the Go version one for one.
+/// Point-in-time snapshot of status and traffic statistics. Traffic counters accumulate across
+/// rebuilds and Stop. Outbound traffic is counted when natslink hands a message to the client;
+/// inbound traffic is counted when a natslink subscription reader receives it, before Gate/Dedup.
+/// Direct I/O through `client()` and inbound messages discarded inside async-nats are excluded.
+/// Counters are read independently; a concurrent snapshot is not a transaction.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Stats {
     /// Connection name (pool members carry a `-<i>` suffix, mirrored endpoints `-e<i>`); the
@@ -355,9 +369,13 @@ pub struct Stats {
     /// Whole-connection self-healing rebuilds after a "permanent close" (excluding the initial
     /// connect).
     pub rebuilds: u64,
+    /// Messages received by natslink readers, including copies later gated or deduplicated.
     pub in_msgs: u64,
+    /// Messages accepted by the client command queue; not a server or delivery acknowledgement.
     pub out_msgs: u64,
+    /// Received payload plus encoded header bytes, excluding subject, reply and protocol framing.
     pub in_bytes: u64,
+    /// Accepted payload bytes (natslink's publisher API sends no headers).
     pub out_bytes: u64,
 
     /// Publisher: publish failures (rebuild window / timeout / oversized); Subscriber: messages
@@ -553,6 +571,68 @@ mod tests {
         assert!(matches!(a, Auth::None));
         assert!(split_auth(" , ").is_err());
         assert!(split_auth("nats://tok@").is_err());
+    }
+
+    #[test]
+    fn url_credentials_decode_after_separating_user_and_password() {
+        let cases = [
+            (
+                "nats://n%61ts+token@localhost:4222",
+                Auth::Token("nats+token".into()),
+            ),
+            (
+                "nats://user%3Aname:p%40ss%2Bword@localhost:4222",
+                Auth::UserPass("user:name".into(), "p@ss+word".into()),
+            ),
+            (
+                "nats://token%3Avalue@localhost:4222",
+                Auth::Token("token:value".into()),
+            ),
+            (
+                "nats://%E2%9C%93@localhost:4222",
+                Auth::Token("\u{2713}".into()),
+            ),
+            (
+                "nats://u:@localhost:4222",
+                Auth::UserPass("u".into(), String::new()),
+            ),
+        ];
+        for (raw, expected) in cases {
+            let (servers, actual) = split_auth(raw).unwrap();
+            assert_eq!(servers, ["nats://localhost:4222"]);
+            assert!(actual == expected, "decoded credential did not match");
+        }
+        let (_, auth) =
+            split_auth("nats://t%6Fken@localhost:4222,nats://token@localhost:4223").unwrap();
+        assert!(auth == Auth::Token("token".into()));
+    }
+
+    #[test]
+    fn malformed_credentials_fail_without_echoing_input() {
+        for secret in ["S3cret%", "S3cret%0", "S3cret%ZZ", "S3cret%FF"] {
+            let raw = format!("nats://{secret}@localhost:4222");
+            let Err(error) = split_auth(&raw) else {
+                panic!("malformed credential accepted");
+            };
+            assert!(matches!(error, Error::Config(_)));
+            assert!(!format!("{error:?} {error}").contains("S3cret"));
+        }
+    }
+
+    #[test]
+    fn shared_auth_contract() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/contract-v1.json")).unwrap();
+        assert_eq!(contract["version"], 1);
+        for case in contract["url_cases"].as_array().unwrap() {
+            let (_, actual) = split_auth(case["url"].as_str().unwrap()).unwrap();
+            let username = case["username"].as_str().unwrap().to_owned();
+            let expected = match case["password"].as_str() {
+                Some(password) => Auth::UserPass(username, password.to_owned()),
+                None => Auth::Token(username),
+            };
+            assert!(actual == expected, "auth case {}", case["name"]);
+        }
     }
 
     #[test]

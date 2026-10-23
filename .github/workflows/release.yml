@@ -14,15 +14,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: tag matches Cargo.toml version
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          want=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          echo "tag=$tag version=$want"
-          if [ "$tag" != "$want" ]; then
-            echo "::error::tag v$tag does not match Cargo.toml version=$want; bump the version and re-tag"
-            exit 1
-          fi
+      - name: validate release and Go reference metadata
+        run: python3 .github/scripts/check_reference.py --tag "$GITHUB_REF_NAME"
       - name: release notes from CHANGELOG.md
         id: notes
         run: |

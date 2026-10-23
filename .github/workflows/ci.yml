@@ -27,6 +27,7 @@ jobs:
           toolchain: ${{ matrix.rust }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - run: python3 .github/scripts/check_reference.py
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
@@ -73,3 +74,34 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  conformance:
+    name: shared Go/Rust contract
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v7
+      - name: resolve pinned Go commit
+        id: go_reference
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          from pathlib import Path
+          import re
+          sha = Path(".github/conformance-go.sha").read_text().strip()
+          if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+              raise SystemExit("Go conformance reference must be a full commit ID")
+          print(f"sha={sha}")
+          PY
+      - uses: actions/checkout@v7
+        with:
+          repository: Jolly23/natslink
+          ref: ${{ steps.go_reference.outputs.sha }}
+          path: _conformance/go
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: _conformance/go/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: python3 .github/scripts/check_contract.py _conformance/go

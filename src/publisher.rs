@@ -37,6 +37,7 @@ pub struct PublisherOptions {
 #[derive(Clone)]
 pub struct Publisher {
     link: Arc<Link>,
+    subject: async_nats::Subject,
     max_payload: usize,
 }
 
@@ -44,6 +45,7 @@ impl Publisher {
     pub fn new(o: PublisherOptions) -> Result<Publisher, Error> {
         let opts = o.options.normalize("pub")?;
         Ok(Publisher {
+            subject: async_nats::Subject::from(opts.topic.clone()),
             link: Link::new(opts, "pub", 0, o.queue_capacity),
             max_payload: o.max_payload,
         })
@@ -93,6 +95,12 @@ impl Publisher {
     /// Safe to call concurrently from multiple tasks. `data` is `Bytes`: enqueueing holds a
     /// reference, nothing is copied.
     pub fn publish(&self, data: Bytes) -> Result<(), Error> {
+        self.try_publish(data, true)
+    }
+
+    // A mirror's capacity probe is not a failed send. Count a full queue only
+    // when the caller actually rejects the message, not before its sender waits.
+    fn try_publish(&self, data: Bytes, count_full: bool) -> Result<(), Error> {
         if self.link.is_stopped() {
             return Err(Error::Stopped);
         }
@@ -106,17 +114,20 @@ impl Publisher {
                 max: self.max_payload,
             });
         }
-        let Some(client) = self.link.client() else {
+        let Some(client) = self.link.client_snapshot() else {
             self.link.dropped.fetch_add(1, Ordering::Relaxed);
             return Err(Error::NoConn);
         };
         // async-nats' publish only sends into a bounded command channel; poll it once here:
         // Pending = queue full. Wrapped in `unconstrained` so an exhausted tokio cooperative
         // budget cannot make a free slot look like a full queue.
-        match tokio::task::unconstrained(client.publish(self.link.o.topic.clone(), data))
-            .now_or_never()
+        let bytes = data.len();
+        match tokio::task::unconstrained(client.publish(self.subject.clone(), data)).now_or_never()
         {
-            Some(Ok(())) => Ok(()),
+            Some(Ok(())) => {
+                self.link.record_publish(bytes);
+                Ok(())
+            }
             Some(Err(e)) => {
                 self.link.dropped.fetch_add(1, Ordering::Relaxed);
                 if e.kind() == PublishErrorKind::Send {
@@ -135,10 +146,40 @@ impl Publisher {
                 }
             }
             None => {
-                self.link.dropped.fetch_add(1, Ordering::Relaxed);
+                if count_full {
+                    self.link.dropped.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(Error::BufferFull(self.link.client_capacity))
             }
         }
+    }
+
+    /// Only an endpoint's owned send task waits here; the public API remains
+    /// synchronous. Cancelling this future before enqueue cannot publish a copy.
+    async fn publish_wait(&self, data: Bytes, cancel: &CancellationToken) -> Result<(), Error> {
+        let Some(client) = self.link.client_snapshot() else {
+            self.link.dropped.fetch_add(1, Ordering::Relaxed);
+            return Err(Error::NoConn);
+        };
+        let bytes = data.len();
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(Error::Stopped),
+            result = tokio::time::timeout(STOP_GRACE, client.publish(self.subject.clone(), data)) => {
+                match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) if error.kind() == PublishErrorKind::Send => Err(Error::NoConn),
+                    Ok(Err(error)) => Err(Error::Nats(redact_error(&self.link.o.url, &error.to_string()))),
+                    Err(_) => Err(Error::BufferFull(self.link.client_capacity)),
+                }
+            }
+        };
+        if result.is_ok() {
+            self.link.record_publish(bytes);
+        } else {
+            self.link.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        result
     }
 
     pub fn is_connected(&self) -> bool {
@@ -322,6 +363,7 @@ struct PubGroup {
     cursor: AtomicU64,
     queue: Option<Arc<SendQueue>>,
     stop: CancellationToken,
+    cancel_send: CancellationToken,
     finished: CancellationToken,
     worker_started: AtomicBool,
     #[cfg(test)]
@@ -352,6 +394,7 @@ impl PubGroup {
             cursor: AtomicU64::new(0),
             queue: None,
             stop: CancellationToken::new(),
+            cancel_send: CancellationToken::new(),
             finished: CancellationToken::new(),
             worker_started: AtomicBool::new(false),
             #[cfg(test)]
@@ -373,14 +416,24 @@ impl PubGroup {
     }
 
     /// Healthy first, then the disconnected members observed in the first pass.
-    /// A member is tried at most once even when connectivity changes mid-call.
+    /// Probe each member once; an asynchronous sender may subsequently wait on
+    /// the first full candidate, whose probe did not enqueue a message.
     fn publish(&self, data: &Bytes) -> Result<(), Error> {
+        self.try_publish(data, true).0
+    }
+
+    fn try_publish(
+        &self,
+        data: &Bytes,
+        count_full: bool,
+    ) -> (Result<(), Error>, Option<&Publisher>) {
         let n = self.pubs.len() as u64;
         let start = self.cursor.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
         let mut last_err = Error::NoConn;
         let mut fallback = [None; 8];
         let mut extra = Vec::new();
         let mut disconnected = 0;
+        let mut waiting = None;
         for i in 0..n {
             let p = &self.pubs[(start.wrapping_add(i) % n) as usize];
             if !p.is_connected() {
@@ -392,18 +445,26 @@ impl PubGroup {
                 disconnected += 1;
                 continue;
             }
-            match p.publish(data.clone()) {
-                Ok(()) => return Ok(()),
+            match p.try_publish(data.clone(), count_full) {
+                Ok(()) => return (Ok(()), None),
+                Err(err @ Error::BufferFull(_)) => {
+                    waiting.get_or_insert(p);
+                    last_err = err;
+                }
                 Err(err) => last_err = err,
             }
         }
         for p in fallback.into_iter().flatten().chain(extra) {
-            match p.publish(data.clone()) {
-                Ok(()) => return Ok(()),
+            match p.try_publish(data.clone(), count_full) {
+                Ok(()) => return (Ok(()), None),
+                Err(err @ Error::BufferFull(_)) => {
+                    waiting.get_or_insert(p);
+                    last_err = err;
+                }
                 Err(err) => last_err = err,
             }
         }
-        Err(last_err)
+        (Err(last_err), waiting)
     }
 
     async fn send(&self, copy: MirrorCopy) {
@@ -416,7 +477,15 @@ impl PubGroup {
             copy.finish(result.is_err());
             return;
         }
-        let failed = self.publish(copy.data()).is_err();
+        let (result, waiting) = self.try_publish(copy.data(), false);
+        let failed = if let Some(publisher) = waiting {
+            publisher
+                .publish_wait(copy.data().clone(), &self.cancel_send)
+                .await
+                .is_err()
+        } else {
+            result.is_err()
+        };
         copy.finish(failed);
     }
 
@@ -659,9 +728,10 @@ impl PublisherPool {
 
     /// One ordered sequence shared by concurrent callers, even if the first
     /// caller is cancelled: stop admission, drain send lines for at most 5s,
-    /// then stop all members concurrently (at most another 5s). A timed-out
-    /// in-flight send may settle later, exactly as in Go; queued leftovers are
-    /// dropped immediately and counted separately from member send failures.
+    /// then stop all members and await cancelled senders concurrently (at most
+    /// another 5s). A send that outlives both budgets may settle later; queued
+    /// leftovers are dropped immediately and counted separately from member
+    /// send failures.
     pub async fn stop(&self) {
         {
             let _guard = self.inner.lifecycle.write().unwrap();
@@ -683,12 +753,30 @@ impl PublisherPool {
                                 let queue = group.queue.as_ref().unwrap();
                                 tracing::warn!(client = %group.pubs[0].link.o.name, queued = queue.len(),
                                     "[natslink] endpoint send stop grace exceeded, discarding queued copies");
+                                group.cancel_send.cancel();
                                 queue.drain();
                             }
                         })).await;
                     }
-                    futures::future::join_all(inner.pubs.iter().map(|publisher| publisher.stop()))
-                        .await;
+                    // Closing members and settling cancelled sends share one
+                    // deadline. A member closing first does not prove its
+                    // sender has observed cancellation and counted its copy.
+                    let deadline = tokio::time::Instant::now() + STOP_GRACE;
+                    let members = futures::future::join_all(
+                        inner.pubs.iter().map(|publisher| publisher.stop()),
+                    );
+                    let senders = futures::future::join_all(
+                        inner
+                            .groups
+                            .iter()
+                            .filter(|group| group.worker_started.load(Ordering::Acquire))
+                            .map(|group| group.finished.cancelled()),
+                    );
+                    // Link shutdown is owned independently of this waiter, so
+                    // reaching the shared deadline does not cancel cleanup.
+                    let _ =
+                        tokio::time::timeout_at(deadline, futures::future::join(members, senders))
+                            .await;
                 });
             }
         }
@@ -1010,7 +1098,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stop_has_one_parallel_line_deadline_and_counts_only_queued_leftovers() {
+    async fn stop_bounds_both_phases_when_an_inflight_send_ignores_cancellation() {
         let (pool, senders) = fixture(8, 1024, [true, true]);
         for sender in &senders {
             sender.fail.store(true, Ordering::Release);
@@ -1027,7 +1115,7 @@ mod tests {
         .await;
         let start = tokio::time::Instant::now();
         futures::future::join(pool.stop(), pool.stop()).await;
-        assert_eq!(start.elapsed(), STOP_GRACE);
+        assert_eq!(start.elapsed(), 2 * STOP_GRACE);
         assert_eq!(
             pool.dropped(),
             4,
@@ -1046,6 +1134,44 @@ mod tests {
             Err(Error::Stopped)
         ));
         assert_eq!(pool.dropped(), 6);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_waits_for_cancelled_sender_settlement_after_members_close() {
+        let (pool, _) = fixture(8, 1024, [true, true]);
+        let entered = Arc::new(AtomicUsize::new(0));
+        for group in &pool.inner.groups {
+            let entered = entered.clone();
+            let cancel = group.cancel_send.clone();
+            *group.test_send.lock().unwrap() = Some(Arc::new(move |_| {
+                let entered = entered.clone();
+                let cancel = cancel.clone();
+                Box::pin(async move {
+                    entered.fetch_add(1, Ordering::Release);
+                    cancel.cancelled().await;
+                    // Model a sender that needs another turn after member
+                    // shutdown to finish cancellation and settle its copy.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    Err(Error::Stopped)
+                })
+            }));
+        }
+        pool.register_senders().unwrap();
+        for _ in 0..3 {
+            pool.publish(Bytes::from_static(b"message")).unwrap();
+        }
+        until(|| entered.load(Ordering::Acquire) == 2).await;
+        let start = tokio::time::Instant::now();
+        pool.stop().await;
+        assert_eq!(start.elapsed(), STOP_GRACE + Duration::from_secs(1));
+        assert_eq!(pool.dropped(), 3);
+        for group in &pool.inner.groups {
+            assert!(group.finished.is_cancelled());
+        }
+        for stats in pool.stats() {
+            assert_eq!(stats.queue_len, 0);
+            assert_eq!(stats.queue_dropped, 2);
+        }
     }
 
     #[tokio::test]

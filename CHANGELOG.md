@@ -2,11 +2,40 @@
 
 All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate
-adheres to [Semantic Versioning](https://semver.org/). Version numbers track
+adheres to [Semantic Versioning](https://semver.org/). Major and minor versions track
 the Go module [`github.com/Jolly23/natslink`](https://github.com/Jolly23/natslink)
 whose semantics this crate implements (`natslink::GO_REFERENCE_VERSION`).
 
 ## [Unreleased]
+
+## [1.8.4] - 2026-10-23
+
+### Fixed
+- Mirrored send tasks wait for client command capacity within a bounded send
+  timeout instead of discarding accepted messages on a temporary full queue.
+  Public `publish` remains non-blocking and each endpoint waits independently.
+- Traffic statistics count actual payload admission and subscription reads
+  instead of estimating payload bytes from protocol counters. Document the
+  receive-buffer and direct-client boundaries imposed by `async-nats`.
+- Reuse the normalized subject and a shared client snapshot on publish calls,
+  removing wrapper allocations from full-queue rejection.
+- URL authentication decodes percent-encoded userinfo exactly once, preserving
+  literal plus signs and the distinction between encoded and separating colons.
+  Error redaction covers encoded usernames and passwords, short credentials
+  and quoted escape forms consistently with the Go implementation.
+- `make itest` works with POSIX shells and preserves the test process's exit
+  status while retaining its log.
+
+### Added
+- Shared Go/Rust contract fixtures and CI checks for deduplication, subscriber
+  dispatch and redaction, plus validation of the Go reference metadata.
+
+### Changed
+- Document independent patch versions within a shared major/minor contract,
+  the boundary between public non-blocking admission and internal send waits,
+  and the two separate 5 s mirrored-stop phases.
+- Track Go natslink v1.8.4 (`GO_REFERENCE_VERSION`); the cross-implementation
+  contract CI runs against that release's commit.
 
 ## [1.8.3] - 2026-10-22
 
@@ -39,7 +68,5 @@ First public release. Rust port of Go natslink v1.8.3 on `async-nats` 0.50.
 - `fetch_update` call sites carry `#[allow(deprecated)]`: Rust 1.99 renamed it
   to `try_update`, which does not exist on the minimum supported 1.91 yet.
 
-### Earlier history
-Versions 1.5.x to 1.8.2 of this crate were maintained inside a private
-workspace and track the corresponding Go releases; see the Go module's
-CHANGELOG for the behaviour each version introduced.
+### Earlier behavior
+See the Go module's CHANGELOG for the behavior introduced before v1.8.3.
