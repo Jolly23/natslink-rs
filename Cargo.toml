@@ -1,0 +1,37 @@
+[package]
+name = "natslink"
+version = "1.8.3"
+edition = "2021"
+rust-version = "1.91"
+description = "One NATS connection bound to one subject, as a self-healing unit (Rust port of github.com/Jolly23/natslink)"
+license = "MIT"
+repository = "https://github.com/Jolly23/natslink-rs"
+readme = "README.md"
+keywords = ["nats", "messaging", "reconnect", "supervision"]
+categories = ["network-programming", "asynchronous"]
+publish = false
+
+# Distributed as a git dependency pinned by tag (see README "Install"); the
+# empty [workspace] makes this crate its own root.
+[package.metadata.go-reference]
+module = "github.com/Jolly23/natslink"
+version = "v1.8.3"
+revision = "b3524cc5727824c83dff1a4d4f35478e6c07777a"
+checksum = "h1:4rzL6WszSb347YHxsCanBGAfWgoJTukCYo+wL9lNfPU="
+
+[workspace]
+
+[dependencies]
+rapidhash = { version = "4.5", default-features = false }
+async-nats = { version = "0.50", default-features = false, features = ["ring"] }
+bytes = "1"
+futures = "0.3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+rand = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

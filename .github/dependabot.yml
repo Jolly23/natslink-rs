@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-deps:
+        patterns: ["*"]
+    ignore:
+      # async-nats is pinned to the 0.50 line on purpose: a minor bump changes
+      # the client's reconnect / event semantics this crate is built around.
+      - dependency-name: async-nats
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

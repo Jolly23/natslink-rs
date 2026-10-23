@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: tag matches Cargo.toml version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          want=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          echo "tag=$tag version=$want"
+          if [ "$tag" != "$want" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version=$want; bump the version and re-tag"
+            exit 1
+          fi
+      - name: release notes from CHANGELOG.md
+        id: notes
+        run: |
+          body=$(.github/scripts/changelog_section.sh "${GITHUB_REF_NAME#v}")
+          if [ -z "$body" ]; then
+            echo "::error::CHANGELOG.md has no '## [${GITHUB_REF_NAME#v}]' section; add it and re-tag"
+            exit 1
+          fi
+          { echo "body<<NOTES_EOF"; echo "$body"; echo "NOTES_EOF"; } >> "$GITHUB_OUTPUT"
+      - run: cargo test --locked
+      - name: create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ github.ref_name }}
+          body: ${{ steps.notes.outputs.body }}
