@@ -797,6 +797,9 @@ impl Inner {
     }
 
     /// Subscribes this topic on client and spawns a reader task. Caller holds the state lock.
+    // `fetch_update` is deprecated in favour of `try_update` on newer toolchains; the
+    // replacement is not available on the minimum supported Rust version yet.
+    #[allow(deprecated)]
     async fn subscribe_on(self: &Arc<Self>, idx: usize, client: &Client) -> Result<Reader, Error> {
         let link = &self.links[idx];
         if self
