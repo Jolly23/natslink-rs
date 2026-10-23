@@ -8,7 +8,7 @@ whose semantics this crate implements (`natslink::GO_REFERENCE_VERSION`).
 
 ## [Unreleased]
 
-## [1.8.4] - 2026-10-22
+## [1.8.4] - 2026-10-23
 
 ### Fixed
 - Mirrored send tasks wait for client command capacity within a bounded send
@@ -34,6 +34,8 @@ whose semantics this crate implements (`natslink::GO_REFERENCE_VERSION`).
 - Document independent patch versions within a shared major/minor contract,
   the boundary between public non-blocking admission and internal send waits,
   and the two separate 5 s mirrored-stop phases.
+- Track Go natslink v1.8.4 (`GO_REFERENCE_VERSION`); the cross-implementation
+  contract CI runs against that release's commit.
 
 ## [1.8.3] - 2026-10-22
 

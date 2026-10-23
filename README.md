@@ -45,7 +45,7 @@ The crate is distributed as a git dependency pinned by tag:
 
 ```toml
 [dependencies]
-natslink = { git = "https://github.com/Jolly23/natslink-rs", tag = "v1.8.3" }
+natslink = { git = "https://github.com/Jolly23/natslink-rs", tag = "v1.8.4" }
 ```
 
 Requires Rust 1.91 or newer. `natslink::VERSION` is the crate version and

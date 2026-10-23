@@ -1,7 +1,7 @@
 //! # natslink (Rust)
 //!
 //! Wraps "**one NATS connection bound to one topic**" into a self-supervising unit that works
-//! out of the box. Tracks the public Go module `github.com/Jolly23/natslink` v1.8.3; client-level
+//! out of the box. Tracks the public Go module `github.com/Jolly23/natslink` v1.8.4; client-level
 //! differences are listed in the README.
 //!
 //! - [`probe`] / [`must_probe`]: fail-fast startup probe. Environment errors (address / network /
@@ -78,7 +78,7 @@ pub use bytes::Bytes;
 /// to identify the Rust build.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Published Go release used as the reference for the shared minor-version contract.
-pub const GO_REFERENCE_VERSION: &str = "v1.8.3";
+pub const GO_REFERENCE_VERSION: &str = "v1.8.4";
 
 // —— Connection supervision parameters: fixed values tuned in production; callers need not (and cannot) configure them ——
 pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
