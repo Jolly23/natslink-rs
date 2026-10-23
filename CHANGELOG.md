@@ -32,6 +32,13 @@ First public release. Rust port of Go natslink v1.8.3 on `async-nats` 0.50.
 - Re-export of `async_nats`, `Message` and `Bytes` so hosts depend on one
   client version only.
 
+### Changed
+- Lockfile: rustls 0.23.46, rustls-webpki 0.103.16, webpki-roots 1.0.10
+  (RUSTSEC-2026-0346/0347/0348/0349/0381/0382), tokio 1.54.1, tokio-util
+  0.7.20, yoke-derive 0.8.4 (the 0.8.3 release was yanked).
+- `fetch_update` call sites carry `#[allow(deprecated)]`: Rust 1.99 renamed it
+  to `try_update`, which does not exist on the minimum supported 1.91 yet.
+
 ### Earlier history
 Versions 1.5.x to 1.8.2 of this crate were maintained inside a private
 workspace and track the corresponding Go releases; see the Go module's

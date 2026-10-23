@@ -239,6 +239,9 @@ impl SendQueue {
         })
     }
 
+    // `fetch_update` is deprecated in favour of `try_update` on newer toolchains; the
+    // replacement is not available on the minimum supported Rust version yet.
+    #[allow(deprecated)]
     fn reserve(&self, bytes: usize) -> bool {
         if self.tx.is_closed() {
             return false;
