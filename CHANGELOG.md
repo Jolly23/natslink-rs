@@ -8,6 +8,13 @@ whose semantics this crate implements (`natslink::GO_REFERENCE_VERSION`).
 
 ## [Unreleased]
 
+### Changed
+- Document that a successful `publish` only queues the message: on tokio's
+  multi-thread runtime the woken send task waits in the caller's worker LIFO
+  slot until the caller yields, so callers doing synchronous work after a
+  publish should `yield_now().await` first. Documentation only; behavior is
+  unchanged.
+
 ## [1.8.4] - 2026-10-23
 
 ### Fixed

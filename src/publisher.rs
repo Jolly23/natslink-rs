@@ -94,6 +94,10 @@ impl Publisher {
     ///
     /// Safe to call concurrently from multiple tasks. `data` is `Bytes`: enqueueing holds a
     /// reference, nothing is copied.
+    ///
+    /// `Ok` means queued, not written: the woken connection task sits in the calling
+    /// worker's (non-stealable) LIFO slot until the caller yields. Yield right after
+    /// publishing before doing synchronous work; see README "Publishing".
     pub fn publish(&self, data: Bytes) -> Result<(), Error> {
         self.try_publish(data, true)
     }
@@ -785,6 +789,9 @@ impl PublisherPool {
 
     /// Nonblocking. Single endpoint: synchronous routing; multiple endpoints:
     /// independent queue admission with asynchronous eventual loss accounting.
+    ///
+    /// Either way `Ok` means queued, not written; the send happens after the caller
+    /// yields (see [`Publisher::publish`] and README "Publishing").
     pub fn publish(&self, data: Bytes) -> Result<(), Error> {
         if self.inner.max_payload > 0 && data.len() > self.inner.max_payload {
             self.inner.dropped.fetch_add(1, Ordering::Relaxed);

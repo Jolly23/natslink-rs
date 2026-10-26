@@ -194,6 +194,28 @@ is never parked on NATS back-pressure. `queue_capacity` counts messages, not
 bytes (default 1024); choose a small value for large payloads so a stalled
 server cannot pin memory.
 
+**`Ok` means queued, not written.** The socket write happens in the client's
+connection task (or, with mirroring, the endpoint's send task), which the
+enqueue wakes. On tokio's multi-thread runtime a task woken from a worker goes
+into that worker's LIFO slot, which other workers do not steal, so it runs only
+after the calling task reaches an `.await` that returns `Pending`. A caller
+that publishes and then does synchronous work (decoding, hashing, bookkeeping,
+draining already-buffered input) delays the actual send by that much, even
+with idle workers. When send latency matters, yield right after publishing,
+before the heavy work:
+
+```rust,ignore
+pool.publish(payload)?;
+tokio::task::yield_now().await; // let the woken send task write first
+expensive_bookkeeping();
+```
+
+A caller that returns to an `.await` immediately (for example a loop that
+publishes and then waits on its input channel) needs nothing extra. The Go
+module has no equivalent caveat: idle Ps in the Go scheduler can steal a
+just-readied goroutine from another P's `runnext` slot after a few
+microseconds.
+
 `PublisherPool::new(n, opts)` keeps `n` publishers and round-robins between
 them, trying connected members first and disconnected ones only as a last
 resort. `dropped()` counts messages that no member could send.
